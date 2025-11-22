@@ -1,0 +1,10 @@
+{
+  "schedule": "*/30 * * * * *",
+  "evms": [
+    {
+      "recurringPaymentsAddress": "0x145BEdA70dFE4d4bA6e25A9fdc7eed988caA7810",
+      "chainName": "ethereum-testnet-sepolia",
+      "gasLimit": "500000"
+    }
+  ]
+}
