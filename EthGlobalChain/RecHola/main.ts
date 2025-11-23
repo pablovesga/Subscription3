@@ -32,21 +32,23 @@ type AgreementData = {
   installmentsPaid: bigint;
   totalInstallments: bigint;
   isActive: boolean;
+  timesRemaining: bigint;
 };
 
 type MyResult = {
-  agreementId: bigint;
-  agreementData: AgreementData;
-  txHash: string;
+  processedRecords: number;
+  executedPayments: number;
+  recordsProcessed: {
+    id: number;
+    executed: boolean;
+  }[];
 };
 
 const onCronTrigger = (runtime: Runtime<Config>): MyResult => {
-  runtime.log("Workflow triggered - Reading agreement data and executing payment");
+  runtime.log("Workflow triggered - Processing all recurring payment records");
 
-  // Get the first EVM configuration from the list.
   const evmConfig = runtime.config.evms[0];
 
-  // Convert the human-readable chain name to a chain selector
   const network = getNetwork({
     chainFamily: "evm",
     chainSelectorName: evmConfig.chainName,
@@ -59,81 +61,130 @@ const onCronTrigger = (runtime: Runtime<Config>): MyResult => {
 
   const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector);
 
-  // Agreement ID to process
-  const agreementId = 1n;
-
-  // Step 1: Read agreement data first
-  const callData = encodeFunctionData({
+  // Step 1: Get all record IDs
+  runtime.log("Step 1: Fetching all record IDs from contract");
+  
+  const getAllIdsCallData = encodeFunctionData({
     abi: RecurringPayments,
-    functionName: "getRecord",
-    args: [agreementId],
+    functionName: "getAllRecordIds",
+    args: [],
   });
 
-  runtime.log(`Reading agreement ID: ${agreementId}`);
-
-  const contractCall = evmClient
+  const idsResponse = evmClient
     .callContract(runtime, {
       call: encodeCallMsg({
         from: zeroAddress,
         to: evmConfig.recurringPaymentsAddress as `0x${string}`,
-        data: callData,
+        data: getAllIdsCallData,
       }),
       blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
     })
     .result();
 
-  // Decode the result
-  const agreementData = decodeFunctionResult({
+  const allRecordIds = decodeFunctionResult({
     abi: RecurringPayments,
-    functionName: "getRecord",
-    data: bytesToHex(contractCall.data),
-  }) as [string, string, bigint, bigint, bigint, bigint, bigint, boolean];
+    functionName: "getAllRecordIds",
+    data: bytesToHex(idsResponse.data),
+  }) as bigint[];
 
-  const result: AgreementData = {
-    sender: agreementData[0],
-    receiver: agreementData[1],
-    amount: agreementData[2],
-    interval: agreementData[3],
-    nextPayment: agreementData[4],
-    installmentsPaid: agreementData[5],
-    totalInstallments: agreementData[6],
-    isActive: agreementData[7],
-  };
+  runtime.log(`Found ${allRecordIds.length} records to process`);
 
-  runtime.log(`Agreement Data:`);
-  runtime.log(`  Sender: ${result.sender}`);
-  runtime.log(`  Receiver: ${result.receiver}`);
-  runtime.log(`  Amount: ${result.amount}`);
-  runtime.log(`  Interval: ${result.interval} seconds`);
-  runtime.log(`  Next Payment: ${result.nextPayment} (timestamp)`);
-  runtime.log(`  Installments Paid: ${result.installmentsPaid}`);
-  runtime.log(`  Total Installments: ${result.totalInstallments}`);
-  runtime.log(`  Is Active: ${result.isActive}`);
+  const recordsProcessed: { id: number; executed: boolean }[] = [];
+  let executedPayments = 0;
 
-  // Step 2: Execute payInstallment
-  const txHash = executePayInstallment(
-    runtime,
-    network.chainSelector.selector,
-    evmConfig,
-    agreementId
-  );
+  // Step 2: Process each record
+  for (const recordId of allRecordIds) {
+    runtime.log(`\n--- Processing Record ID: ${recordId} ---`);
+    
+    // Get record details
+    const getRecordCallData = encodeFunctionData({
+      abi: RecurringPayments,
+      functionName: "getRecord",
+      args: [recordId],
+    });
+
+    const recordResponse = evmClient
+      .callContract(runtime, {
+        call: encodeCallMsg({
+          from: zeroAddress,
+          to: evmConfig.recurringPaymentsAddress as `0x${string}`,
+          data: getRecordCallData,
+        }),
+        blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
+      })
+      .result();
+
+    const recordData = decodeFunctionResult({
+      abi: RecurringPayments,
+      functionName: "getRecord",
+      data: bytesToHex(recordResponse.data),
+    }) as [string, string, bigint, bigint, bigint, bigint, bigint, boolean];
+
+    const installmentsPaid = recordData[5];
+    const totalInstallments = recordData[6];
+    const isActive = recordData[7];
+    const timesRemaining = totalInstallments - installmentsPaid;
+
+    runtime.log(`  Sender: ${recordData[0]}`);
+    runtime.log(`  Receiver: ${recordData[1]}`);
+    runtime.log(`  Amount: ${recordData[2]}`);
+    runtime.log(`  Installments Paid: ${installmentsPaid}`);
+    runtime.log(`  Total Installments: ${totalInstallments}`);
+    runtime.log(`  Times Remaining: ${timesRemaining}`);
+    runtime.log(`  Is Active: ${isActive}`);
+
+    // Step 3: Check if payment should be executed
+    if (timesRemaining > 0n) {
+      runtime.log(`  ❌ Skipping - No installments remaining`);
+      recordsProcessed.push({ id: Number(recordId), executed: false });
+      continue;
+    }
+
+    if (!isActive) {
+      runtime.log(`  ❌ Skipping - Record is not active`);
+      recordsProcessed.push({ id: Number(recordId), executed: false });
+      continue;
+    }
+
+    // Execute payment
+    runtime.log(`  ✅ Executing payment for record ${recordId}`);
+    const txHash = executePayInstallment(runtime, evmConfig, recordId);
+    runtime.log(`  Transaction: ${txHash}`);
+    
+    recordsProcessed.push({ id: Number(recordId), executed: true });
+    executedPayments++;
+  }
+
+  runtime.log(`\n=== Summary ===`);
+  runtime.log(`Total Records Processed: ${allRecordIds.length}`);
+  runtime.log(`Payments Executed: ${executedPayments}`);
 
   return {
-    agreementId,
-    agreementData: result,
-    txHash,
+    processedRecords: allRecordIds.length,
+    executedPayments,
+    recordsProcessed,
   };
 };
 
 function executePayInstallment(
   runtime: Runtime<Config>,
-  chainSelector: bigint,
   evmConfig: EvmConfig,
   agreementId: bigint
 ): string {
   runtime.log(`Executing payInstallment for agreement ID: ${agreementId}`);
 
-  const evmClient = new cre.capabilities.EVMClient(chainSelector);
+  // Get network info from evmConfig
+  const network = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName: evmConfig.chainName,
+    isTestnet: true,
+  });
+
+  if (!network) {
+    throw new Error(`Unknown chain name: ${evmConfig.chainName}`);
+  }
+
+  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector);
 
   // Encode the payInstallment function call
   const payInstallmentData = encodeFunctionData({
@@ -142,15 +193,13 @@ function executePayInstallment(
     args: [agreementId],
   });
 
-  // Encode the report data (the function call)
-  const reportData = encodeAbiParameters(
-    parseAbiParameters("uint256 id"),
-    [agreementId]
-  );
-
   runtime.log(`Preparing to call payInstallment for ID: ${agreementId}`);
+  runtime.log(`Calldata: ${payInstallmentData}`);
 
-  // Generate a signed report
+  // Encode the report data with the full calldata
+  const reportData = payInstallmentData;
+
+  // Generate a signed report with the calldata
   const reportResponse = runtime
     .report({
       encodedPayload: hexToBase64(reportData),
@@ -159,6 +208,8 @@ function executePayInstallment(
       hashingAlgo: "keccak256",
     })
     .result();
+
+  runtime.log(`Report generated with signature`);
 
   // Submit the report to execute payInstallment
   const writeReportResult = evmClient
@@ -171,10 +222,10 @@ function executePayInstallment(
     })
     .result();
 
-  runtime.log("Waiting for transaction confirmation");
+  runtime.log("Transaction submitted, waiting for confirmation");
 
   const txHash = bytesToHex(writeReportResult.txHash || new Uint8Array(32));
-  runtime.log(`Payment transaction succeeded: ${txHash}`);
+  runtime.log(`Payment transaction hash: ${txHash}`);
   runtime.log(`View transaction at https://sepolia.etherscan.io/tx/${txHash}`);
   
   return txHash;

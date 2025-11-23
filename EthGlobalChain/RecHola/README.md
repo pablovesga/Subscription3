@@ -1,4 +1,5 @@
 # Typescript Simple Workflow Example
+0x145BEdA70dFE4d4bA6e25A9fdc7eed988caA7810
 
 This template provides a simple Typescript workflow example. It shows how to create a simple "Hello World" workflow using Typescript.
 
