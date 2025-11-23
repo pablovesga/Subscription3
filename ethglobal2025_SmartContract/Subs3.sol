@@ -5,17 +5,18 @@ import "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 
 /// @title Subscription3
-/// @notice Balance sheet per subscription UID + Pyth oracle for fiat-denominated recurring payments.
-/// @dev ETH-only version for ETHGlobal Hackathon (Sepolia deployment).
+/// @notice ETH-denominated execution for USD-denominated subscriptions, priced via Pyth.
+/// @dev Hackathon version for ETHGlobal: simplified ownership, no reentrancy guards.
+///      UID is uint256 for easier frontend / Aztec integration.
 contract Subscription3 {
     /// -----------------------------------------------------------------------
     /// Events
     /// -----------------------------------------------------------------------
 
-    event Deposited(bytes32 indexed uid, address indexed from, uint256 amountWei);
+    event Deposited(uint256 indexed uid, address indexed from, uint256 amountWei);
 
     event PaymentExecuted(
-        bytes32 indexed uid,
+        uint256 indexed uid,
         uint256 amountWei,
         address indexed to,
         int64 price,
@@ -26,7 +27,7 @@ contract Subscription3 {
     event ExecutorUpdated(address indexed oldExecutor, address indexed newExecutor);
     event OwnerUpdated(address indexed oldOwner, address indexed newOwner);
 
-    event NewSubscription(bytes32 indexed uid, uint256 amountUsd);
+    event NewSubscription(uint256 indexed uid, uint256 amountUsd);
 
     /// -----------------------------------------------------------------------
     /// Storage
@@ -35,31 +36,31 @@ contract Subscription3 {
     address public owner;
     address public executor;
 
+    /// @notice Temporary Aztec placeholder (ETH burned).
     address public constant AZTEC_PLACEHOLDER = address(0);
 
-    /// @notice Balance per UID (in ETH wei)
-    mapping(bytes32 => uint256) public uidBalance;
+    /// @notice ETH balance per UID
+    mapping(uint256 => uint256) public uidBalance;
 
-    /// @notice The USD amount (2 decimals) for each subscription UID.
-    /// Example: $10.99 → 1099
-    mapping(bytes32 => uint256) public uidUsdAmount;
+    /// @notice USD amount per UID (2 decimals). Example: $10.99 => 1099
+    mapping(uint256 => uint256) public uidUsdAmount;
 
-    /// @notice A list of all subscription UIDs ever created.
-    bytes32[] public allUids;
+    /// @notice Array of all subscription UIDs
+    uint256[] public allUids;
 
     /// -----------------------------------------------------------------------
-    /// Pyth configuration
+    /// Pyth config
     /// -----------------------------------------------------------------------
 
+    /// @notice Pyth Price Feed Contract on Sepolia.
+    /// @dev Hardcoded for simplicity during Hackathon.
     IPyth public immutable pyth;
 
     bytes32 public constant ETH_USD_PRICE_ID =
         0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
 
-    /// @notice Maximum allowed age for the price, in seconds.
-    /// @dev We require price to be no older than 60000000 seconds. 
-    /// (Because you have stale price LOL)
-    uint256 public constant PRICE_MAX_AGE = 60000000;
+    /// @notice Max allowed age: set very large for hackathon simplicity.
+    uint256 public constant PRICE_MAX_AGE = 60000000; // ~694 days
 
     /// -----------------------------------------------------------------------
     /// Modifiers
@@ -76,22 +77,22 @@ contract Subscription3 {
     }
 
     /// -----------------------------------------------------------------------
-    /// Constructor
+    /// Constructor (NO parameters per instruction)
     /// -----------------------------------------------------------------------
 
-    /// @param _pyth     Pyth price feed contract address on Sepolia.
-    /// Please use input "0xDd24F84d36BF92C65F92307595335bdFab5Bbd21" for DEMO
-    constructor(address _pyth) {
+    constructor() {
         owner = msg.sender;
         executor = msg.sender;
-        pyth = IPyth(_pyth);
+
+        // Hardcoding Pyth price feed contract (Sepolia) for simplicity during Hackathon.
+        pyth = IPyth(0xDd24F84d36BF92C65F92307595335bdFab5Bbd21);
 
         emit OwnerUpdated(address(0), msg.sender);
         emit ExecutorUpdated(address(0), msg.sender);
     }
 
     /// -----------------------------------------------------------------------
-    /// Admin (Owner-only)
+    /// Admin
     /// -----------------------------------------------------------------------
 
     function setOwner(address newOwner) external onlyOwner {
@@ -107,12 +108,10 @@ contract Subscription3 {
     }
 
     /// -----------------------------------------------------------------------
-    /// Subscription registration (Frontend)
+    /// Subscription registration
     /// -----------------------------------------------------------------------
 
-    /// @notice Register a new subscription UID + USD amount.
-    /// @dev USD input uses 2 decimals. Example: $12.50 → 1250.
-    function newSubscription(bytes32 uid, uint256 amountUsd) external onlyOwner {
+    function newSubscription(uint256 uid, uint256 amountUsd) external onlyOwner {
         require(uidUsdAmount[uid] == 0, "Subscription3: UID exists");
         require(amountUsd > 0, "Subscription3: invalid USD amount");
 
@@ -123,19 +122,25 @@ contract Subscription3 {
     }
 
     /// -----------------------------------------------------------------------
-    /// User deposits
+    /// Deposits
     /// -----------------------------------------------------------------------
 
-    function deposit(bytes32 uid) external payable {
+    function deposit(uint256 uid) external payable {
         require(msg.value > 0, "Subscription3: no value");
-
         uidBalance[uid] += msg.value;
-
         emit Deposited(uid, msg.sender, msg.value);
     }
 
     /// -----------------------------------------------------------------------
-    /// Public read helper
+    /// Getter for all UIDs (as requested)
+    /// -----------------------------------------------------------------------
+
+    function getAllUids() external view returns (uint256[] memory) {
+        return allUids;
+    }
+
+    /// -----------------------------------------------------------------------
+    /// Read-only Pyth helper
     /// -----------------------------------------------------------------------
 
     function getLatestEthUsdPrice()
@@ -151,44 +156,43 @@ contract Subscription3 {
     }
 
     /// -----------------------------------------------------------------------
-    /// Chainlink Runtime Execution (Recurring Payments)
+    /// Payment Execution (Chainlink Runtime Environment)
     /// -----------------------------------------------------------------------
 
-    /// @notice Execute monthly (or periodic) payment.
-    /// @param uid The subscription UID
-    /// @param amountUsd USD amount with **2 decimals** (e.g., $10.99 → 1099)
-    function executePayment(bytes32 uid, uint256 amountUsd) external onlyExecutor {
-        require(amountUsd > 0, "Subscription3: zero USD amount");
+    /// @notice Executes a payment for the given UID.
+    /// @dev No USD parameter—pulled directly from uidUsdAmount.
+    function executePayment(uint256 uid) external onlyExecutor {
+        uint256 amountUsd = uidUsdAmount[uid];
+        require(amountUsd > 0, "Subscription3: no USD amount set");
 
-        // Fetch fresh Pyth price
+        // 1. Fetch Pyth price
         PythStructs.Price memory p = pyth.getPriceNoOlderThan(
             ETH_USD_PRICE_ID,
             PRICE_MAX_AGE
         );
-
         require(p.price > 0, "Subscription3: invalid price");
         require(p.expo < 0, "Subscription3: unexpected exponent");
 
         int64 price = p.price;
         int32 expo  = p.expo;
 
-        // Conversion USD (2 decimals) → ETH (wei)
+        // 2. USD(2 decimals) → ETH(wei)
         uint256 ethWei;
         unchecked {
-            uint32 expoAbs = uint32(uint32(-expo));  
-            uint32 power = 18 + expoAbs - 2;         
-
+            uint32 expoAbs = uint32(uint32(-expo));
+            uint32 power = 18 + expoAbs - 2;
             uint256 numerator = amountUsd * (10 ** power);
             ethWei = numerator / uint64(price);
         }
-
         require(ethWei > 0, "Subscription3: zero wei result");
 
-        uint256 currentBalance = uidBalance[uid];
-        require(currentBalance >= ethWei, "Subscription3: insufficient balance");
+        // 3. Balance check
+        uint256 bal = uidBalance[uid];
+        require(bal >= ethWei, "Subscription3: insufficient balance");
 
-        uidBalance[uid] = currentBalance - ethWei;
+        uidBalance[uid] = bal - ethWei;
 
+        // 4. Send ETH (placeholder)
         (bool ok, ) = payable(AZTEC_PLACEHOLDER).call{value: ethWei}("");
         require(ok, "Subscription3: payment failed");
 
@@ -204,9 +208,8 @@ contract Subscription3 {
         );
     }
 
-    /// Internal Aztec hook
-    function _notifyAztecBridge(bytes32, uint256) internal {
-        // Empty for now — to be implemented later.
+    function _notifyAztecBridge(uint256, uint256) internal {
+        // Empty placeholder for real Aztec integration
     }
 
     /// -----------------------------------------------------------------------
