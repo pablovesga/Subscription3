@@ -1,0 +1,28 @@
+{
+  "name": "hardhat-example",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "postinstall": "node -e \"require('fs').writeFileSync('node_modules/@aztec/l1-contracts/remappings.txt', '@oz/=node_modules/@openzeppelin/contracts/\\n@aztec/=node_modules/@aztec/l1-contracts/src/\\n')\""
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ignition": "^3.0.3",
+    "@nomicfoundation/hardhat-toolbox-viem": "^5.0.0",
+    "@types/node": "^22.18.10",
+    "forge-std": "github:foundry-rs/forge-std#v1.9.4",
+    "hardhat": "^3.0.7",
+    "typescript": "~5.8.0",
+    "viem": "^2.38.2"
+  },
+  "dependencies": {
+    "@aztec/l1-contracts": "git+https://github.com/AztecProtocol/l1-contracts.git#3.0.0-devnet.5",
+    "@nomicfoundation/hardhat-ignition-viem": "^3.0.3",
+    "@nomicfoundation/hardhat-keystore": "^3.0.1",
+    "@nomicfoundation/hardhat-network-helpers": "^3.0.1",
+    "@nomicfoundation/hardhat-node-test-runner": "^3.0.3",
+    "@nomicfoundation/hardhat-verify": "^3.0.3",
+    "@nomicfoundation/hardhat-viem": "^3.0.0",
+    "@nomicfoundation/hardhat-viem-assertions": "^3.0.2",
+    "@openzeppelin/contracts": "5.4.0"
+  }
+}
