@@ -16065,32 +16065,51 @@ init_decodeFunctionResult();
 init_encodeFunctionData();
 var RecurringPayments = [
   {
-    inputs: [{ internalType: "uint256", name: "id", type: "uint256" }],
-    name: "payInstallment",
+    inputs: [{ internalType: "uint256", name: "uid", type: "uint256" }],
+    name: "executePayment",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function"
   },
   {
-    inputs: [{ internalType: "uint256", name: "id", type: "uint256" }],
-    name: "getRecord",
-    outputs: [
-      { internalType: "address", name: "sender", type: "address" },
-      { internalType: "address", name: "receiver", type: "address" },
-      { internalType: "uint256", name: "amount", type: "uint256" },
-      { internalType: "uint256", name: "interval", type: "uint256" },
-      { internalType: "uint256", name: "nextPayment", type: "uint256" },
-      { internalType: "uint256", name: "installmentsPaid", type: "uint256" },
-      { internalType: "uint256", name: "totalInstallments", type: "uint256" },
-      { internalType: "bool", name: "isActive", type: "bool" }
-    ],
+    inputs: [{ internalType: "uint256", name: "uid", type: "uint256" }],
+    name: "getSender",
+    outputs: [{ internalType: "address", name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "uid", type: "uint256" }],
+    name: "getReceiver",
+    outputs: [{ internalType: "address", name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "uid", type: "uint256" }],
+    name: "getAmountUsd",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "uid", type: "uint256" }],
+    name: "getIntervalSeconds",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
     stateMutability: "view",
     type: "function"
   },
   {
     inputs: [],
-    name: "getAllRecordIds",
+    name: "getAllUids",
     outputs: [{ internalType: "uint256[]", name: "", type: "uint256[]" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "uid", type: "uint256" }],
+    name: "uidBalance",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
     stateMutability: "view",
     type: "function"
   }
@@ -16108,73 +16127,44 @@ var onCronTrigger = (runtime2) => {
   }
   const evmClient = new cre.capabilities.EVMClient(network248.chainSelector.selector);
   runtime2.log("Step 1: Fetching all record IDs from contract");
+  runtime2.log(`Contract address: ${evmConfig.recurringPaymentsAddress}`);
+  runtime2.log(`Chain: ${evmConfig.chainName}`);
   const getAllIdsCallData = encodeFunctionData({
     abi: RecurringPayments,
-    functionName: "getAllRecordIds",
+    functionName: "getAllUids",
     args: []
   });
-  const idsResponse = evmClient.callContract(runtime2, {
-    call: encodeCallMsg({
-      from: zeroAddress,
-      to: evmConfig.recurringPaymentsAddress,
-      data: getAllIdsCallData
-    }),
-    blockNumber: LAST_FINALIZED_BLOCK_NUMBER
-  }).result();
+  runtime2.log(`Encoded call data: ${getAllIdsCallData}`);
+  let idsResponse;
+  try {
+    idsResponse = evmClient.callContract(runtime2, {
+      call: encodeCallMsg({
+        from: zeroAddress,
+        to: evmConfig.recurringPaymentsAddress,
+        data: getAllIdsCallData
+      }),
+      blockNumber: LAST_FINALIZED_BLOCK_NUMBER
+    }).result();
+  } catch (error) {
+    runtime2.log(`Error calling getAllUids: ${error}`);
+    throw error;
+  }
+  runtime2.log(`Response received, decoding...`);
   const allRecordIds = decodeFunctionResult({
     abi: RecurringPayments,
-    functionName: "getAllRecordIds",
+    functionName: "getAllUids",
     data: bytesToHex(idsResponse.data)
   });
   runtime2.log(`Found ${allRecordIds.length} records to process`);
   const recordsProcessed = [];
   let executedPayments = 0;
-  for (const recordId of allRecordIds) {
+  for (const uid of allRecordIds) {
     runtime2.log(`
---- Processing Record ID: ${recordId} ---`);
-    const getRecordCallData = encodeFunctionData({
-      abi: RecurringPayments,
-      functionName: "getRecord",
-      args: [recordId]
-    });
-    const recordResponse = evmClient.callContract(runtime2, {
-      call: encodeCallMsg({
-        from: zeroAddress,
-        to: evmConfig.recurringPaymentsAddress,
-        data: getRecordCallData
-      }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER
-    }).result();
-    const recordData = decodeFunctionResult({
-      abi: RecurringPayments,
-      functionName: "getRecord",
-      data: bytesToHex(recordResponse.data)
-    });
-    const installmentsPaid = recordData[5];
-    const totalInstallments = recordData[6];
-    const isActive = recordData[7];
-    const timesRemaining = totalInstallments - installmentsPaid;
-    runtime2.log(`  Sender: ${recordData[0]}`);
-    runtime2.log(`  Receiver: ${recordData[1]}`);
-    runtime2.log(`  Amount: ${recordData[2]}`);
-    runtime2.log(`  Installments Paid: ${installmentsPaid}`);
-    runtime2.log(`  Total Installments: ${totalInstallments}`);
-    runtime2.log(`  Times Remaining: ${timesRemaining}`);
-    runtime2.log(`  Is Active: ${isActive}`);
-    if (timesRemaining > 0n) {
-      runtime2.log(`  ❌ Skipping - No installments remaining`);
-      recordsProcessed.push({ id: Number(recordId), executed: false });
-      continue;
-    }
-    if (!isActive) {
-      runtime2.log(`  ❌ Skipping - Record is not active`);
-      recordsProcessed.push({ id: Number(recordId), executed: false });
-      continue;
-    }
-    runtime2.log(`  ✅ Executing payment for record ${recordId}`);
-    const txHash = executePayInstallment(runtime2, evmConfig, recordId);
+--- Processing UID: ${uid} ---`);
+    runtime2.log(`  ✅ Executing payment for UID ${uid}`);
+    const txHash = executePayment(runtime2, evmConfig, uid);
     runtime2.log(`  Transaction: ${txHash}`);
-    recordsProcessed.push({ id: Number(recordId), executed: true });
+    recordsProcessed.push({ id: Number(uid), executed: true });
     executedPayments++;
   }
   runtime2.log(`
@@ -16187,8 +16177,8 @@ var onCronTrigger = (runtime2) => {
     recordsProcessed
   };
 };
-function executePayInstallment(runtime2, evmConfig, agreementId) {
-  runtime2.log(`Executing payInstallment for agreement ID: ${agreementId}`);
+function executePayment(runtime2, evmConfig, uid) {
+  runtime2.log(`Executing executePayment for UID: ${uid}`);
   const network248 = getNetwork({
     chainFamily: "evm",
     chainSelectorName: evmConfig.chainName,
@@ -16198,14 +16188,14 @@ function executePayInstallment(runtime2, evmConfig, agreementId) {
     throw new Error(`Unknown chain name: ${evmConfig.chainName}`);
   }
   const evmClient = new cre.capabilities.EVMClient(network248.chainSelector.selector);
-  const payInstallmentData = encodeFunctionData({
+  const executePaymentData = encodeFunctionData({
     abi: RecurringPayments,
-    functionName: "payInstallment",
-    args: [agreementId]
+    functionName: "executePayment",
+    args: [uid]
   });
-  runtime2.log(`Preparing to call payInstallment for ID: ${agreementId}`);
-  runtime2.log(`Calldata: ${payInstallmentData}`);
-  const reportData = payInstallmentData;
+  runtime2.log(`Preparing to call executePayment for UID: ${uid}`);
+  runtime2.log(`Calldata: ${executePaymentData}`);
+  const reportData = executePaymentData;
   const reportResponse = runtime2.report({
     encodedPayload: hexToBase64(reportData),
     encoderName: "evm",
